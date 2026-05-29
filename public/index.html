@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ProcesInterViewer · Cartographie vocale des process</title>
+    <!-- CSS bpmn-js (rendu des diagrammes) -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/diagram-js.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-js.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-font/css/bpmn.css"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- ============ ECRAN 1 : ACCUEIL / SETUP ============ -->
+    <main id="screen-setup" class="screen">
+      <div class="card">
+        <h1>🎙️ ProcesInterViewer</h1>
+        <p class="subtitle">
+          Interview vocale assistee par IA pour cartographier les processus
+          metier de votre entreprise.
+        </p>
+
+        <div class="field">
+          <label for="entreprise">Nom de l'entreprise</label>
+          <input id="entreprise" type="text" placeholder="Ex : Scierie du Massif" />
+        </div>
+        <div class="field">
+          <label for="interlocuteur">Votre nom / fonction</label>
+          <input id="interlocuteur" type="text" placeholder="Ex : Marie Dupont, Resp. production" />
+        </div>
+
+        <div class="field">
+          <label for="guideSelect">Guide d'interview</label>
+          <select id="guideSelect"></select>
+        </div>
+
+        <details class="guide-details">
+          <summary>Voir / modifier le guide (Markdown)</summary>
+          <textarea id="guideText" rows="10" spellcheck="false"></textarea>
+          <div class="guide-actions">
+            <label class="filebtn">
+              Charger un .md
+              <input id="guideFile" type="file" accept=".md,text/markdown,text/plain" hidden />
+            </label>
+          </div>
+        </details>
+
+        <button id="startBtn" class="primary big">Demarrer l'interview</button>
+        <p id="setupError" class="error" hidden></p>
+        <p class="hint">
+          Un micro est requis. Parlez naturellement : l'IA vous pose les
+          questions et rebondit sur vos reponses.
+        </p>
+      </div>
+    </main>
+
+    <!-- ============ ECRAN 2 : INTERVIEW EN COURS ============ -->
+    <main id="screen-interview" class="screen" hidden>
+      <div class="interview-wrap">
+        <header class="interview-header">
+          <div class="status">
+            <span id="orb" class="orb"></span>
+            <span id="statusText">Connexion…</span>
+          </div>
+          <div class="timer" id="timer">00:00</div>
+        </header>
+
+        <section class="transcript" id="transcript" aria-live="polite"></section>
+
+        <footer class="interview-footer">
+          <button id="muteBtn" class="ghost">🔇 Couper mon micro</button>
+          <button id="endBtn" class="danger">Terminer l'interview</button>
+        </footer>
+      </div>
+    </main>
+
+    <!-- ============ ECRAN 3 : GENERATION ============ -->
+    <main id="screen-building" class="screen" hidden>
+      <div class="card center">
+        <div class="spinner"></div>
+        <h2>Construction du dossier…</h2>
+        <p class="subtitle">
+          Analyse de l'entretien, redaction des fiches processus et generation
+          des diagrammes BPMN. Cela prend generalement 20 a 60 secondes.
+        </p>
+      </div>
+    </main>
+
+    <!-- ============ ECRAN 4 : DOSSIER ============ -->
+    <main id="screen-dossier" class="screen" hidden>
+      <div class="dossier-toolbar no-print">
+        <span class="brand">📁 Dossier de cartographie</span>
+        <div class="spacer"></div>
+        <button id="printBtn" class="ghost">🖨️ Imprimer / PDF</button>
+        <button id="downloadJsonBtn" class="ghost">⬇️ JSON</button>
+        <button id="restartBtn" class="ghost">↺ Nouvelle interview</button>
+      </div>
+      <div id="dossierContent" class="dossier-content"></div>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
