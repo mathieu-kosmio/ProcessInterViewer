@@ -2,17 +2,75 @@
   "name": "proces-interviewer",
   "version": "1.0.0",
   "description": "Interview vocale (OpenAI Realtime) pour cartographier les process metier d'une entreprise et produire un dossier de fiches process avec diagrammes BPMN.",
+  "author": "Kosmio <mathieu@kosm.io>",
   "type": "module",
-  "main": "server.js",
+  "main": "electron/main.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node web.js",
+    "dev": "node --watch web.js",
+    "electron": "electron .",
+    "vendor": "node scripts/build-vendor.mjs",
+    "dist": "electron-builder",
+    "dist:all": "electron-builder -mwl"
   },
   "engines": {
     "node": ">=18"
   },
+  "build": {
+    "appId": "io.kosm.procesinterviewer",
+    "productName": "ProcesInterViewer",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "server.js",
+      "web.js",
+      "public/**/*",
+      "guides/**/*",
+      "package.json",
+      "!**/.env",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "ProcesInterViewer utilise le microphone pour mener l'interview vocale."
+      }
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Office",
+      "maintainer": "Kosmio <mathieu@kosm.io>"
+    }
+  },
   "dependencies": {
     "dotenv": "^16.4.5",
     "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "bpmn-auto-layout": "^0.5.0",
+    "bpmn-js": "^17.11.1",
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.0"
   }
 }

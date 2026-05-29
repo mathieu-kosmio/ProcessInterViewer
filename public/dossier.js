@@ -3,15 +3,20 @@
    Le modele ne genere que du BPMN SEMANTIQUE ; la mise en page (coordonnees)
    est calculee ici par bpmn-auto-layout avant le rendu par bpmn-js. */
 
-const CDN = "https://esm.sh";
+/* Librairies BPMN VENDORISEES localement (public/vendor/), bundlees via esbuild.
+   Avantages vs CDN : aucune dependance reseau pour le rendu (les proxys
+   d'entreprise bloquent souvent esm.sh/jsdelivr), versions figees, demarrage
+   instantane, fonctionne en app de bureau autonome. */
+const VIEWER_URL = "/vendor/bpmn-js.viewer.bundle.js";
+const LAYOUT_URL = "/vendor/bpmn-auto-layout.bundle.js";
 let _viewerMod = null;
 let _layoutMod = null;
 
 async function loadBpmnLibs() {
   if (_viewerMod && _layoutMod) return;
   [_viewerMod, _layoutMod] = await Promise.all([
-    import(`${CDN}/bpmn-js@17.11.1/lib/Viewer`),
-    import(`${CDN}/bpmn-auto-layout@0.5.0`),
+    import(VIEWER_URL),
+    import(LAYOUT_URL),
   ]);
 }
 
@@ -136,12 +141,20 @@ async function renderAllBpmn(procs) {
     await loadBpmnLibs();
   } catch (e) {
     console.error("Chargement bpmn-js impossible:", e);
-    withXml.forEach(({ idx }) => bpmnFallback(idx, "Librairie de diagramme indisponible (verifiez la connexion)."));
+    const detail = (e && e.message ? e.message : String(e)).slice(0, 140);
+    withXml.forEach(({ idx }) =>
+      bpmnFallback(idx, "Librairie de diagramme indisponible. Detail : " + detail)
+    );
     return;
   }
 
-  const Viewer = _viewerMod.default;
+  const Viewer = _viewerMod.default || _viewerMod.Viewer;
   const layoutProcess = _layoutMod.layoutProcess || _layoutMod.default;
+  if (typeof Viewer !== "function" || typeof layoutProcess !== "function") {
+    console.error("Exports BPMN inattendus", { viewer: _viewerMod, layout: _layoutMod });
+    withXml.forEach(({ idx }) => bpmnFallback(idx, "Module BPMN charge mais exports inattendus (voir console)."));
+    return;
+  }
 
   for (const { p, idx } of withXml) {
     const box = document.getElementById(`bpmn-${idx}`);
@@ -151,13 +164,42 @@ async function renderAllBpmn(procs) {
       const laidOut = await layoutProcess(semantic);
       const viewer = new Viewer({ container: box });
       await viewer.importXML(laidOut);
-      const canvas = viewer.get("canvas");
-      canvas.zoom("fit-viewport", "auto");
+      // Le diagramme est importe : on l'ajuste a la vue. Le zoom est isole
+      // dans son propre try car "fit-viewport" peut lever
+      // "SVGMatrix scale non-finite" si le conteneur n'est pas encore mesure
+      // (largeur/hauteur 0). Dans ce cas le diagramme reste affiche, on
+      // re-essaie au frame suivant une fois la mise en page stabilisee.
+      await fitViewport(viewer, box);
     } catch (e) {
       console.error(`BPMN process ${idx} echec:`, e);
       bpmnFallback(idx, "Le diagramme n'a pas pu etre genere automatiquement. Les etapes detaillees ci-dessus restent disponibles.");
     }
   }
+}
+
+/* Ajuste le diagramme a la vue de maniere robuste : attend que le conteneur
+   ait une taille mesurable avant d'appeler fit-viewport, et n'echoue jamais
+   l'affichage du diagramme pour une simple erreur de zoom. */
+function fitViewport(viewer, box, attempt = 0) {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      const ready = box.clientWidth > 0 && box.clientHeight > 0;
+      if (!ready && attempt < 10) {
+        // Conteneur pas encore dimensionne : on re-essaie au frame suivant.
+        fitViewport(viewer, box, attempt + 1).then(resolve);
+        return;
+      }
+      try {
+        const canvas = viewer.get("canvas");
+        canvas.zoom("fit-viewport", "auto");
+      } catch (e) {
+        // Le diagramme est deja rendu ; un echec de zoom ne doit pas le
+        // masquer. On laisse le SVG tel quel (visible, eventuellement non centre).
+        console.warn("zoom fit-viewport ignore:", e && e.message ? e.message : e);
+      }
+      resolve();
+    });
+  });
 }
 
 /* Nettoie les artefacts frequents : fences markdown, espaces, DI parasite. */

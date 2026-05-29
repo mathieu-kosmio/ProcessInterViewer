@@ -4,24 +4,36 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ProcesInterViewer · Cartographie vocale des process</title>
-    <!-- CSS bpmn-js (rendu des diagrammes) -->
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/diagram-js.css"
-    />
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-js.css"
-    />
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bpmn-js@17.11.1/dist/assets/bpmn-font/css/bpmn.css"
-    />
+    <!-- CSS bpmn-js (rendu des diagrammes) — vendorise en local -->
+    <link rel="stylesheet" href="/vendor/bpmn/diagram-js.css" />
+    <link rel="stylesheet" href="/vendor/bpmn/bpmn-js.css" />
+    <link rel="stylesheet" href="/vendor/bpmn/bpmn-font/css/bpmn.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <!-- ============ ECRAN 0 : CONFIGURATION (cle API) — Electron ============ -->
+    <main id="screen-config" class="screen" hidden>
+      <div class="card">
+        <h1>🔑 Configuration</h1>
+        <p class="subtitle">
+          Pour fonctionner, l'application a besoin d'une cle API OpenAI (avec
+          acces a la Realtime API). Elle est stockee de maniere securisee sur
+          votre poste et n'est jamais partagee.
+        </p>
+        <div class="field">
+          <label for="apiKeyInput">Cle API OpenAI</label>
+          <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+        </div>
+        <button id="saveKeyBtn" class="primary big">Enregistrer</button>
+        <p id="configError" class="error" hidden></p>
+        <p id="configHint" class="hint">
+          Obtenez une cle sur platform.openai.com. Elle reste locale a cette machine.
+        </p>
+      </div>
+    </main>
+
     <!-- ============ ECRAN 1 : ACCUEIL / SETUP ============ -->
-    <main id="screen-setup" class="screen">
+    <main id="screen-setup" class="screen" hidden>
       <div class="card">
         <h1>🎙️ ProcesInterViewer</h1>
         <p class="subtitle">
@@ -30,8 +42,17 @@
         </p>
 
         <div class="field">
+          <label for="baseSelect">Partir de</label>
+          <select id="baseSelect">
+            <option value="">🆕 Nouvelle interview</option>
+          </select>
+          <p id="baseInfo" class="field-info" hidden></p>
+        </div>
+
+        <div class="field">
           <label for="entreprise">Nom de l'entreprise</label>
           <input id="entreprise" type="text" placeholder="Ex : Scierie du Massif" />
+          <p id="suggestion" class="suggestion" hidden></p>
         </div>
         <div class="field">
           <label for="interlocuteur">Votre nom / fonction</label>
@@ -55,11 +76,29 @@
         </details>
 
         <button id="startBtn" class="primary big">Demarrer l'interview</button>
+        <button id="historyBtn" class="ghost big" style="margin-top:10px">📚 Historique des interviews</button>
         <p id="setupError" class="error" hidden></p>
         <p class="hint">
           Un micro est requis. Parlez naturellement : l'IA vous pose les
           questions et rebondit sur vos reponses.
+          <span id="settingsLink" class="settings-link" hidden> · <a href="#" id="changeKeyLink">Changer la cle API</a></span>
         </p>
+      </div>
+    </main>
+
+    <!-- ============ ECRAN HISTORIQUE ============ -->
+    <main id="screen-history" class="screen" hidden>
+      <div class="card history-card">
+        <div class="history-head">
+          <h1>📚 Historique</h1>
+          <button id="historyBackBtn" class="ghost">← Retour</button>
+        </div>
+        <p class="subtitle">
+          Toutes vos interviews sont enregistrees ici. Cliquez sur une fiche
+          pour la reconsulter.
+        </p>
+        <div id="historyList" class="history-list"></div>
+        <p id="historyEmpty" class="hint" hidden>Aucune interview enregistree pour l'instant.</p>
       </div>
     </main>
 
@@ -102,6 +141,7 @@
         <div class="spacer"></div>
         <button id="printBtn" class="ghost">🖨️ Imprimer / PDF</button>
         <button id="downloadJsonBtn" class="ghost">⬇️ JSON</button>
+        <button id="historyBtn2" class="ghost">📚 Historique</button>
         <button id="restartBtn" class="ghost">↺ Nouvelle interview</button>
       </div>
       <div id="dossierContent" class="dossier-content"></div>

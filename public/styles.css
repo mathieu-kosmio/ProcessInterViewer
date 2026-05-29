@@ -15,6 +15,11 @@
 
 * { box-sizing: border-box; }
 
+/* L'attribut HTML [hidden] doit TOUJOURS l'emporter sur les display: des
+   regles ci-dessous (.screen utilise display:flex, qui sinon ecraserait
+   hidden et superposerait les ecrans). */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -102,6 +107,39 @@ button:disabled { opacity: 0.5; cursor: default; }
 .danger:hover { opacity: 0.9; }
 
 .hint { color: var(--muted); font-size: 0.8rem; margin-top: 16px; line-height: 1.4; }
+.field-info { color: var(--accent); font-size: 0.8rem; margin: 6px 0 0; line-height: 1.4; }
+.suggestion {
+  font-size: 0.82rem; margin: 6px 0 0; line-height: 1.4;
+  background: rgba(63,140,255,0.1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
+.suggestion a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.settings-link a { color: var(--accent); text-decoration: none; }
+.settings-link a:hover { text-decoration: underline; }
+
+/* ---------- Historique ---------- */
+.history-card { max-width: 640px; }
+.history-head { display: flex; align-items: center; justify-content: space-between; }
+.history-list { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; max-height: 60vh; overflow-y: auto; }
+.history-item {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px;
+  cursor: pointer; transition: border-color 0.15s, background 0.15s;
+}
+.history-item:hover { border-color: var(--accent); background: var(--border); }
+.history-item .hi-main { flex: 1; min-width: 0; }
+.history-item .hi-title { font-weight: 600; }
+.history-item .hi-sub { color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
+.history-item .hi-count {
+  font-size: 0.75rem; color: var(--accent);
+  background: rgba(63,140,255,0.12); border-radius: 999px; padding: 3px 9px; white-space: nowrap;
+}
+.history-item .hi-del {
+  border: none; background: transparent; color: var(--muted);
+  font-size: 1.1rem; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+}
+.history-item .hi-del:hover { color: var(--red); background: rgba(239,68,68,0.1); }
 .error { color: var(--red); font-size: 0.85rem; margin-top: 12px; }
 
 /* ---------- Interview ---------- */

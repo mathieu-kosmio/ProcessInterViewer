@@ -1,140 +1,244 @@
 import express from "express";
-import dotenv from "dotenv";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, basename } from "node:path";
-
-dotenv.config();
+import { dirname, join } from "node:path";
+import { createStore } from "./store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-realtime";
-const REALTIME_VOICE = process.env.REALTIME_VOICE || "marin";
-const DOSSIER_MODEL = process.env.DOSSIER_MODEL || "gpt-4o";
 
-if (!OPENAI_API_KEY) {
-  console.warn(
-    "\n⚠️  OPENAI_API_KEY absente. Copie .env.example vers .env et renseigne ta cle.\n"
-  );
+/* ------------------------------------------------------------------ */
+/*  Factory : cree l'app Express SANS appeler .listen().               */
+/*  La cle API est fournie via getApiKey() et lue A CHAQUE requete,    */
+/*  ce qui permet aux deux modes (web standalone + Electron) de        */
+/*  fonctionner : en web elle vient de process.env, en Electron du     */
+/*  coffre securise de l'OS (safeStorage), saisie par l'utilisateur.   */
+/* ------------------------------------------------------------------ */
+export function createServer({ getApiKey, config = {}, dataDir } = {}) {
+  const REALTIME_MODEL = config.realtimeModel || process.env.REALTIME_MODEL || "gpt-realtime";
+  const REALTIME_VOICE = config.realtimeVoice || process.env.REALTIME_VOICE || "marin";
+  const DOSSIER_MODEL = config.dossierModel || process.env.DOSSIER_MODEL || "gpt-4o";
+
+  const resolveKey = typeof getApiKey === "function" ? getApiKey : () => undefined;
+
+  // Historique des sessions : en Electron dataDir = userData ; en web,
+  // dossier ./data a cote du projet.
+  const store = createStore(dataDir || join(__dirname, "data"));
+
+  const app = express();
+  app.use(express.json({ limit: "8mb" }));
+  app.use(express.static(join(__dirname, "public")));
+  app.use("/guides", express.static(join(__dirname, "guides")));
+
+  /* ---------------------------------------------------------------- */
+  /*  1. Jeton ephemere pour la Realtime API (WebRTC cote navigateur) */
+  /* ---------------------------------------------------------------- */
+  app.post("/api/token", async (req, res) => {
+    const apiKey = await resolveKey();
+    if (!apiKey) {
+      return res.status(500).json({ error: "OPENAI_API_KEY non configuree." });
+    }
+    try {
+      const voice = (req.body && req.body.voice) || REALTIME_VOICE;
+      const sessionConfig = {
+        session: {
+          type: "realtime",
+          model: REALTIME_MODEL,
+          audio: { output: { voice } },
+        },
+      };
+
+      const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(sessionConfig),
+      });
+
+      const text = await r.text();
+      if (!r.ok) {
+        console.error("Erreur client_secrets:", r.status, text);
+        return res.status(r.status).json({ error: "Echec creation jeton", detail: text });
+      }
+      const data = JSON.parse(text);
+      // La cle ephemere est dans data.value (GA) ; on renvoie aussi le modele.
+      res.json({ value: data.value, expires_at: data.expires_at, model: REALTIME_MODEL });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  2. Liste des guides d'interview disponibles (dossier /guides)   */
+  /* ---------------------------------------------------------------- */
+  app.get("/api/guides", async (_req, res) => {
+    try {
+      const files = await readdir(join(__dirname, "guides"));
+      res.json(files.filter((f) => f.toLowerCase().endsWith(".md")));
+    } catch {
+      res.json([]);
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  3. Generation du dossier final (fiches process + BPMN)          */
+  /* ---------------------------------------------------------------- */
+  app.post("/api/dossier", async (req, res) => {
+    const apiKey = await resolveKey();
+    if (!apiKey) {
+      return res.status(500).json({ error: "OPENAI_API_KEY non configuree." });
+    }
+    const { transcript, guide, meta, parentId } = req.body || {};
+    if (!transcript || !transcript.trim()) {
+      return res.status(400).json({ error: "Transcript vide." });
+    }
+
+    // Mode enrichissement : on recharge le dossier anterieur de la lignee
+    // pour fusionner de maniere incrementale (conserver / mettre a jour /
+    // ajouter), au lieu de repartir de zero.
+    let previousDossier = null;
+    if (parentId) {
+      const parent = await store.get(parentId);
+      if (parent && parent.dossier) previousDossier = parent.dossier;
+    }
+
+    const system = buildDossierSystemPrompt({ incremental: Boolean(previousDossier) });
+    const user = buildDossierUserPrompt({ transcript, guide, meta, previousDossier });
+
+    try {
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: DOSSIER_MODEL,
+          temperature: 0.2,
+          max_tokens: 16000,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      });
+
+      const text = await r.text();
+      if (!r.ok) {
+        console.error("Erreur dossier:", r.status, text);
+        return res.status(r.status).json({ error: "Echec generation dossier", detail: text });
+      }
+      const completion = JSON.parse(text);
+      const content = completion.choices?.[0]?.message?.content || "{}";
+      let dossier;
+      try {
+        dossier = JSON.parse(content);
+      } catch (e) {
+        return res.status(502).json({ error: "Reponse JSON invalide du modele", detail: content.slice(0, 2000) });
+      }
+
+      // Enregistre la session dans l'historique (best-effort : un echec de
+      // sauvegarde ne doit pas priver l'utilisateur de son dossier).
+      // parentId => nouvelle version reliee a la lignee existante.
+      let saved = null;
+      try {
+        saved = await store.save({ meta, guide, transcript, dossier, parentId });
+      } catch (e) {
+        console.error("Echec sauvegarde historique:", e);
+      }
+
+      res.json({ ...dossier, _id: saved?.id, _version: saved?.version, _createdAt: saved?.createdAt });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  4. Config publique consommee par le frontend (sans secret)      */
+  /* ---------------------------------------------------------------- */
+  app.get("/api/config", async (_req, res) => {
+    const apiKey = await resolveKey();
+    res.json({
+      model: REALTIME_MODEL,
+      voice: REALTIME_VOICE,
+      hasKey: Boolean(apiKey),
+    });
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  5. Historique des sessions (fiches consultables ulterieurement) */
+  /* ---------------------------------------------------------------- */
+  // Liste des sessions (resumes, tries du plus recent)
+  app.get("/api/history", async (_req, res) => {
+    try {
+      res.json(await store.list());
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // Versions d'une lignee (tracabilite). Defini AVANT /:id pour ne pas
+  // etre capture par le parametre generique.
+  app.get("/api/history/:lineageId/versions", async (req, res) => {
+    res.json(await store.versions(req.params.lineageId));
+  });
+
+  // Detail complet d'une session (meta + guide + transcript + dossier)
+  app.get("/api/history/:id", async (req, res) => {
+    const rec = await store.get(req.params.id);
+    if (!rec) return res.status(404).json({ error: "Session introuvable." });
+    res.json(rec);
+  });
+
+  // Suppression d'une session
+  app.delete("/api/history/:id", async (req, res) => {
+    const ok = await store.remove(req.params.id);
+    res.json({ ok });
+  });
+
+  return app;
 }
 
-const app = express();
-app.use(express.json({ limit: "8mb" }));
-app.use(express.static(join(__dirname, "public")));
-app.use("/guides", express.static(join(__dirname, "guides")));
-
 /* ------------------------------------------------------------------ */
-/*  1. Jeton ephemere pour la Realtime API (WebRTC cote navigateur)    */
+/*  Demarre le serveur sur 127.0.0.1 (jamais 0.0.0.0).                 */
+/*  port=0 => l'OS attribue un port libre, recupere via address().    */
+/*  Renvoie { server, port }.                                          */
 /* ------------------------------------------------------------------ */
-app.post("/api/token", async (req, res) => {
-  if (!OPENAI_API_KEY) {
-    return res.status(500).json({ error: "OPENAI_API_KEY non configuree." });
-  }
-  try {
-    const voice = (req.body && req.body.voice) || REALTIME_VOICE;
-    const sessionConfig = {
-      session: {
-        type: "realtime",
-        model: REALTIME_MODEL,
-        audio: { output: { voice } },
-      },
-    };
-
-    const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(sessionConfig),
+export function startServer(opts = {}) {
+  const app = createServer(opts);
+  return new Promise((resolve, reject) => {
+    const srv = app.listen(opts.port ?? 0, "127.0.0.1", () => {
+      resolve({ server: srv, port: srv.address().port });
     });
-
-    const text = await r.text();
-    if (!r.ok) {
-      console.error("Erreur client_secrets:", r.status, text);
-      return res.status(r.status).json({ error: "Echec creation jeton", detail: text });
-    }
-    const data = JSON.parse(text);
-    // La cle ephemere est dans data.value (GA) ; on renvoie aussi le modele.
-    res.json({ value: data.value, expires_at: data.expires_at, model: REALTIME_MODEL });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* ------------------------------------------------------------------ */
-/*  2. Liste des guides d'interview disponibles (dossier /guides)      */
-/* ------------------------------------------------------------------ */
-app.get("/api/guides", async (_req, res) => {
-  try {
-    const files = await readdir(join(__dirname, "guides"));
-    res.json(files.filter((f) => f.toLowerCase().endsWith(".md")));
-  } catch {
-    res.json([]);
-  }
-});
-
-/* ------------------------------------------------------------------ */
-/*  3. Generation du dossier final (fiches process + BPMN semantique)  */
-/* ------------------------------------------------------------------ */
-app.post("/api/dossier", async (req, res) => {
-  if (!OPENAI_API_KEY) {
-    return res.status(500).json({ error: "OPENAI_API_KEY non configuree." });
-  }
-  const { transcript, guide, meta } = req.body || {};
-  if (!transcript || !transcript.trim()) {
-    return res.status(400).json({ error: "Transcript vide." });
-  }
-
-  const system = buildDossierSystemPrompt();
-  const user = buildDossierUserPrompt({ transcript, guide, meta });
-
-  try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: DOSSIER_MODEL,
-        temperature: 0.2,
-        max_tokens: 16000,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-
-    const text = await r.text();
-    if (!r.ok) {
-      console.error("Erreur dossier:", r.status, text);
-      return res.status(r.status).json({ error: "Echec generation dossier", detail: text });
-    }
-    const completion = JSON.parse(text);
-    const content = completion.choices?.[0]?.message?.content || "{}";
-    let dossier;
-    try {
-      dossier = JSON.parse(content);
-    } catch (e) {
-      return res.status(502).json({ error: "Reponse JSON invalide du modele", detail: content.slice(0, 2000) });
-    }
-    res.json(dossier);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err) });
-  }
-});
+    srv.on("error", reject);
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /*  Prompts                                                            */
 /* ------------------------------------------------------------------ */
-function buildDossierSystemPrompt() {
-  return `Tu es un consultant senior en organisation et en cartographie des processus metier (approche type ISO 9001 / norme BPMN 2.0). On te fournit la transcription d'une interview vocale menee aupres d'une entreprise, ainsi que le guide d'interview utilise. Ta mission : produire un DOSSIER COMPLET et structure cartographiant l'ensemble des processus metier evoques.
+function buildDossierSystemPrompt({ incremental = false } = {}) {
+  const incrementalBlock = incremental
+    ? `
+
+MODE MISE A JOUR INCREMENTALE (IMPORTANT) :
+On te fournit en plus un DOSSIER ANTERIEUR (cartographie deja etablie lors d'entretiens precedents). Tu ne repars PAS de zero : tu produis une version A JOUR de ce dossier en appliquant ces regles de fusion :
+- CONSERVE tel quel tout processus du dossier anterieur qui n'est PAS aborde dans la nouvelle transcription (ne le supprime pas, ne l'appauvris pas).
+- METS A JOUR un processus existant uniquement si la nouvelle transcription apporte des informations nouvelles, des corrections ou des changements le concernant ; integre alors ces evolutions sans perdre les details anterieurs encore valides.
+- AJOUTE les nouveaux processus evoques qui n'existaient pas.
+- Conserve les "id" des processus anterieurs (P01, P02...) ; attribue de nouveaux id aux nouveaux processus.
+- Si l'interviewe revient explicitement sur un sujet pour le modifier/corriger, la nouvelle information PREVAUT sur l'ancienne.
+- Mets a jour la cartographie d'ensemble et les "lacunes" en consequence (retire des lacunes ce qui a ete comble).
+- Pour un processus modifie, regenere son bpmn_xml pour refleter le deroulement a jour ; pour un processus inchange, tu peux conserver son bpmn_xml anterieur.
+Le resultat final doit etre un dossier COMPLET et autonome (anciens + nouveaux elements fusionnes), pas seulement les nouveautes.`
+    : "";
+
+  return `Tu es un consultant senior en organisation et en cartographie des processus metier (approche type ISO 9001 / norme BPMN 2.0). On te fournit la transcription d'une interview vocale menee aupres d'une entreprise, ainsi que le guide d'interview utilise. Ta mission : produire un DOSSIER COMPLET et structure cartographiant l'ensemble des processus metier evoques.${incrementalBlock}
 
 Tu dois repondre UNIQUEMENT avec un objet JSON valide (aucun texte hors JSON), respectant exactement ce schema :
 
@@ -194,7 +298,7 @@ Consignes generales :
 - Reponds en francais.`;
 }
 
-function buildDossierUserPrompt({ transcript, guide, meta }) {
+function buildDossierUserPrompt({ transcript, guide, meta, previousDossier }) {
   const m = meta || {};
   const entete = [
     m.entreprise ? `Entreprise : ${m.entreprise}` : null,
@@ -204,27 +308,21 @@ function buildDossierUserPrompt({ transcript, guide, meta }) {
     .filter(Boolean)
     .join("\n");
 
-  return `${entete ? entete + "\n\n" : ""}=== GUIDE D'INTERVIEW UTILISE ===
+  const anterieur = previousDossier
+    ? `=== DOSSIER ANTERIEUR (a mettre a jour, ne pas repartir de zero) ===
+${JSON.stringify(previousDossier)}
+
+`
+    : "";
+
+  return `${entete ? entete + "\n\n" : ""}${anterieur}=== GUIDE D'INTERVIEW UTILISE ===
 ${guide || "(non fourni)"}
 
-=== TRANSCRIPTION DE L'INTERVIEW ===
+=== TRANSCRIPTION DE LA NOUVELLE INTERVIEW ===
 ${transcript}
 
 === FIN ===
-Produis maintenant le dossier JSON conforme au schema.`;
+${previousDossier
+  ? "Produis maintenant le dossier JSON A JOUR (fusion du dossier anterieur et des nouvelles informations), conforme au schema."
+  : "Produis maintenant le dossier JSON conforme au schema."}`;
 }
-
-/* Config publique consommee par le frontend (sans secret) */
-app.get("/api/config", (_req, res) => {
-  res.json({
-    model: REALTIME_MODEL,
-    voice: REALTIME_VOICE,
-    hasKey: Boolean(OPENAI_API_KEY),
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`\n🎙️  ProcesInterViewer en ecoute sur http://localhost:${PORT}`);
-  console.log(`   Realtime: ${REALTIME_MODEL} | Voix: ${REALTIME_VOICE} | Dossier: ${DOSSIER_MODEL}`);
-  if (!OPENAI_API_KEY) console.log("   (Configure OPENAI_API_KEY dans .env avant de lancer une interview)\n");
-});

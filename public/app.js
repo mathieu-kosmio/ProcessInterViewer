@@ -13,15 +13,33 @@ const state = {
   turns: [],
   // buffers en cours de construction par item_id
   partial: new Map(),
+  // enrichissement : session source choisie (dossier anterieur), ou null
+  baseSession: null,
 };
 
 const els = {
   screens: {
+    config: document.getElementById("screen-config"),
     setup: document.getElementById("screen-setup"),
+    history: document.getElementById("screen-history"),
     interview: document.getElementById("screen-interview"),
     building: document.getElementById("screen-building"),
     dossier: document.getElementById("screen-dossier"),
   },
+  historyBtn: document.getElementById("historyBtn"),
+  historyBtn2: document.getElementById("historyBtn2"),
+  historyBackBtn: document.getElementById("historyBackBtn"),
+  historyList: document.getElementById("historyList"),
+  historyEmpty: document.getElementById("historyEmpty"),
+  apiKeyInput: document.getElementById("apiKeyInput"),
+  saveKeyBtn: document.getElementById("saveKeyBtn"),
+  configError: document.getElementById("configError"),
+  configHint: document.getElementById("configHint"),
+  settingsLink: document.getElementById("settingsLink"),
+  changeKeyLink: document.getElementById("changeKeyLink"),
+  baseSelect: document.getElementById("baseSelect"),
+  baseInfo: document.getElementById("baseInfo"),
+  suggestion: document.getElementById("suggestion"),
   entreprise: document.getElementById("entreprise"),
   interlocuteur: document.getElementById("interlocuteur"),
   guideSelect: document.getElementById("guideSelect"),
@@ -85,6 +103,71 @@ els.guideFile.addEventListener("change", async (e) => {
   if (!file) return;
   els.guideText.value = await file.text();
   els.guideSelect.value = "";
+});
+
+/* ---------------- Menu "Partir de" (enrichissement incremental) ---------------- */
+let historyCache = []; // resumes des interviews existantes
+
+async function loadBaseOptions() {
+  try {
+    historyCache = await (await fetch("/api/history")).json();
+  } catch {
+    historyCache = [];
+  }
+  // Reconstruit le menu : "Nouvelle" + une entree par interview existante.
+  els.baseSelect.innerHTML = '<option value="">🆕 Nouvelle interview</option>';
+  for (const s of historyCache) {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    const v = s.version && s.version > 1 ? ` v${s.version}` : "";
+    opt.textContent = `↻ ${s.entreprise}${v} — ${s.nbProcessus} process`;
+    els.baseSelect.appendChild(opt);
+  }
+}
+
+// Selection explicite d'une base dans le menu
+els.baseSelect.addEventListener("change", () => selectBase(els.baseSelect.value));
+
+async function selectBase(id) {
+  els.suggestion.hidden = true;
+  if (!id) {
+    state.baseSession = null;
+    els.baseInfo.hidden = true;
+    return;
+  }
+  try {
+    const rec = await (await fetch("/api/history/" + encodeURIComponent(id))).json();
+    if (!rec || !rec.dossier) throw new Error("introuvable");
+    state.baseSession = rec;
+    els.baseSelect.value = id;
+    // Pre-remplit l'entreprise et signale le mode enrichissement
+    const nom = rec.dossier.entreprise?.nom || rec.meta?.entreprise || "";
+    if (nom) els.entreprise.value = nom;
+    const nb = Array.isArray(rec.dossier.processus) ? rec.dossier.processus.length : 0;
+    els.baseInfo.textContent = `Mode enrichissement : ${nb} processus deja cartographies. L'intervieweur ne reposera que les questions utiles (manques, changements, nouveaux process).`;
+    els.baseInfo.hidden = false;
+  } catch {
+    state.baseSession = null;
+  }
+}
+
+// Suggestion automatique quand le nom saisi correspond a une interview connue
+els.entreprise.addEventListener("input", () => {
+  if (state.baseSession) return; // deja en mode enrichissement
+  const val = els.entreprise.value.trim().toLowerCase();
+  els.suggestion.hidden = true;
+  if (val.length < 3) return;
+  const match = historyCache.find(
+    (s) => (s.entreprise || "").toLowerCase().includes(val) || val.includes((s.entreprise || "").toLowerCase())
+  );
+  if (match) {
+    els.suggestion.innerHTML =
+      `Une interview existe deja pour « ${match.entreprise} ». ` +
+      `<a id="useExisting">Continuer / enrichir celle-ci</a> au lieu d'en creer une nouvelle ?`;
+    els.suggestion.hidden = false;
+    const link = document.getElementById("useExisting");
+    if (link) link.addEventListener("click", () => selectBase(match.id));
+  }
 });
 
 /* ---------------- Demarrage de l'interview ---------------- */
@@ -180,8 +263,9 @@ function showError(msg) {
 function onDataChannelOpen(guide) {
   const entreprise = els.entreprise.value.trim();
   const interlocuteur = els.interlocuteur.value.trim();
+  const base = state.baseSession;
 
-  const instructions = buildInterviewerInstructions({ guide, entreprise, interlocuteur });
+  const instructions = buildInterviewerInstructions({ guide, entreprise, interlocuteur, base });
 
   // Configure la session : instructions, transcription de l'entree, VAD
   send({
@@ -198,26 +282,52 @@ function onDataChannelOpen(guide) {
     },
   });
 
-  // Demande a l'IA de demarrer (mot d'accueil + 1ere question)
+  // Demande a l'IA de demarrer : accueil + 1ere question adaptee au mode.
+  const openingInstructions = base
+    ? "Accueille brievement la personne (1 phrase) et rappelle qu'on REPREND la cartographie deja etablie pour la mettre a jour. Resume en une phrase ce qui est deja connu (cite 2-3 processus deja cartographies). Puis demande ce qui a CHANGE depuis, ce qu'on n'avait PAS encore vu, ou s'il y a un process precis a revoir. Ne repose PAS les questions de base sur les process deja documentes, sauf si la personne souhaite y revenir."
+    : "Accueille brievement la personne (1 phrase), explique en une phrase le but (cartographier les processus de l'entreprise), puis propose IMMEDIATEMENT un point de depart concret en citant 3-4 processus types pertinents pour cette activite (un produit a suivre du devis a la pose, ou un processus precis comme achats/vente/stock, ou une activite quotidienne) et demande lequel lui parle le plus. Ne pose PAS de question ouverte et vague.";
   send({
     type: "response.create",
-    response: {
-      instructions:
-        "Accueille brievement la personne, explique en une phrase le but (cartographier les processus de l'entreprise), puis pose ta toute premiere question.",
-    },
+    response: { instructions: openingInstructions },
   });
 }
 
-function buildInterviewerInstructions({ guide, entreprise, interlocuteur }) {
+function buildPriorContext(base) {
+  if (!base || !base.dossier) return "";
+  const d = base.dossier;
+  const procs = Array.isArray(d.processus) ? d.processus : [];
+  const lignes = procs.map((p) => {
+    const etapes = Array.isArray(p.etapes) ? p.etapes.length : 0;
+    return `- ${p.nom || p.id}${p.objectif ? " : " + p.objectif : ""} (${etapes} etapes documentees)`;
+  });
+  const lacunes = Array.isArray(d.lacunes) && d.lacunes.length
+    ? `\nPoints encore a approfondir (priorite pour cet entretien) :\n` + d.lacunes.map((l) => `- ${l}`).join("\n")
+    : "";
+  return `
+
+=== CARTOGRAPHIE DEJA ETABLIE (entretiens precedents) ===
+Tu REPRENDS une cartographie existante pour la METTRE A JOUR de maniere incrementale.
+Processus deja documentes (NE PAS reposer les questions de base dessus, sauf si la personne veut y revenir ou signale un changement) :
+${lignes.join("\n") || "(aucun)"}${lacunes}
+
+REGLE DU MODE MISE A JOUR :
+- Concentre-toi sur : ce qui a CHANGE, ce qui n'a PAS encore ete vu, les NOUVEAUX processus, et les points a approfondir listes ci-dessus.
+- Pour un processus deja documente, demande juste s'il y a du nouveau ou une correction ; ne le re-deroule en entier QUE si la personne le souhaite.
+- Si la personne veut explicitement revenir sur un sujet deja vu, fais-le volontiers.
+=== FIN CARTOGRAPHIE EXISTANTE ===`;
+}
+
+function buildInterviewerInstructions({ guide, entreprise, interlocuteur, base }) {
   return `Tu es un consultant en organisation qui mene une interview vocale, en FRANCAIS, pour cartographier l'ENSEMBLE des processus metier d'une entreprise.
 
 ${entreprise ? `Entreprise interviewee : ${entreprise}.` : ""}
 ${interlocuteur ? `Interlocuteur : ${interlocuteur}.` : ""}
+${buildPriorContext(base)}
 
 STYLE :
 - Parle naturellement, avec chaleur et professionnalisme. Phrases courtes.
 - Pose UNE seule question a la fois, puis ECOUTE. Ne monopolise jamais la parole.
-- Reformule brievement pour confirmer ta comprehension avant de passer au point suivant.
+- NE reformule PAS systematiquement. Enchaine directement sur la question suivante. Ne reformule que si c'est VRAIMENT utile : reponse ambigue, chiffre/regle importants a confirmer, ou point complexe que tu dois t'assurer d'avoir bien compris. Le reste du temps, un simple acquiescement bref suffit ("d'accord", "ok") avant de creuser ou de passer a la suite.
 - Rebondis sur les reponses : creuse les details concrets.
 
 OBJECTIF DE COLLECTE — pour CHAQUE processus evoque, tu dois obtenir :
@@ -231,7 +341,9 @@ OBJECTIF DE COLLECTE — pour CHAQUE processus evoque, tu dois obtenir :
 
 DEROULE :
 - Suis le guide d'interview ci-dessous comme fil conducteur, mais adapte-toi aux reponses.
-- Couvre systematiquement tous les grands domaines : pilotage/management, coeur de metier (realisation), et support (RH, achats, qualite, maintenance, finance, SI...).
+- ENTREE EN MATIERE CONCRETE : ne demande JAMAIS de maniere ouverte et vague "quel processus voulez-vous decrire ?". A la place, propose d'emblee un point de depart en citant 3 ou 4 processus types PERTINENTS pour l'activite de cette entreprise (deduits du guide et du contexte). Exemple pour une menuiserie : "Par quoi voulez-vous commencer ? On peut partir d'un produit que vous fabriquez et suivre son parcours du devis a la pose ; ou prendre un processus precis comme les achats, la vente, la gestion des stocks ; ou encore une activite que vous realisez au quotidien. Qu'est-ce qui vous parle le plus ?". Adapte ces exemples au metier reel (scierie : appro grume, sciage, sechage, expedition ; etc.).
+- Une fois le point de depart choisi, deroule ce processus en profondeur AVANT de passer au suivant. Pour passer a la suite, propose toi-meme le processus logiquement lie (amont/aval) plutot que de reposer une question ouverte.
+- Couvre progressivement tous les grands domaines : pilotage/management, coeur de metier (realisation), et support (RH, achats, qualite, maintenance, finance, SI...).
 - Avance a un rythme confortable. Quand un processus est suffisamment decrit, passe au suivant.
 - Quand tu estimes avoir fait le tour, fais une courte synthese orale, demande s'il manque un processus, puis invite la personne a cliquer sur le bouton "Terminer l'interview" pour generer le dossier.
 
@@ -345,6 +457,8 @@ async function endInterview() {
           interlocuteur: els.interlocuteur.value.trim(),
           date: new Date().toLocaleDateString("fr-FR"),
         },
+        // Enrichissement : relie la nouvelle version a la session source.
+        parentId: state.baseSession ? state.baseSession.id : undefined,
       }),
     });
     const dossier = await resp.json();
@@ -390,5 +504,189 @@ els.downloadJsonBtn.addEventListener("click", () => {
   a.click();
 });
 
-/* ---------------- Init ---------------- */
-loadGuides();
+/* ---------------- Historique des interviews ---------------- */
+function fmtDate(iso) {
+  try {
+    return new Date(iso).toLocaleString("fr-FR", {
+      day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  } catch {
+    return iso || "";
+  }
+}
+
+async function openHistory() {
+  showScreen("history");
+  els.historyList.innerHTML = "";
+  els.historyEmpty.hidden = true;
+  let list = [];
+  try {
+    list = await (await fetch("/api/history")).json();
+  } catch (e) {
+    console.error(e);
+  }
+  if (!Array.isArray(list) || !list.length) {
+    els.historyEmpty.hidden = false;
+    return;
+  }
+  for (const s of list) {
+    const item = document.createElement("div");
+    item.className = "history-item";
+
+    const main = document.createElement("div");
+    main.className = "hi-main";
+    const title = document.createElement("div");
+    title.className = "hi-title";
+    title.textContent = s.entreprise || "Sans nom";
+    const sub = document.createElement("div");
+    sub.className = "hi-sub";
+    const vtxt = s.version && s.version > 1 ? ` · v${s.version}` : "";
+    sub.textContent =
+      fmtDate(s.createdAt) +
+      vtxt +
+      (s.interlocuteur ? " · " + s.interlocuteur : "") +
+      (s.secteur ? " · " + s.secteur : "");
+    main.appendChild(title);
+    main.appendChild(sub);
+
+    const count = document.createElement("span");
+    count.className = "hi-count";
+    count.textContent = s.nbProcessus + " process";
+
+    // Bouton enrichir : revient a l'accueil avec cette session comme base.
+    const enrich = document.createElement("button");
+    enrich.className = "hi-del";
+    enrich.title = "Enrichir / mettre a jour";
+    enrich.textContent = "↻";
+    enrich.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await selectBase(s.id);
+      showScreen("setup");
+    });
+
+    const del = document.createElement("button");
+    del.className = "hi-del";
+    del.title = "Supprimer";
+    del.textContent = "🗑️";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Supprimer definitivement cette interview ?")) return;
+      try {
+        await fetch("/api/history/" + encodeURIComponent(s.id), { method: "DELETE" });
+      } catch {}
+      await loadBaseOptions();
+      openHistory();
+    });
+
+    main.addEventListener("click", () => openSession(s.id));
+    count.addEventListener("click", () => openSession(s.id));
+
+    item.appendChild(main);
+    item.appendChild(enrich);
+    item.appendChild(count);
+    item.appendChild(del);
+    els.historyList.appendChild(item);
+  }
+}
+
+async function openSession(id) {
+  showScreen("building");
+  try {
+    const rec = await (await fetch("/api/history/" + encodeURIComponent(id))).json();
+    if (!rec || !rec.dossier) throw new Error("Session introuvable");
+    state.lastDossier = rec.dossier;
+    await renderDossier(rec.dossier, els.dossierContent);
+    showScreen("dossier");
+  } catch (e) {
+    console.error(e);
+    alert("Impossible d'ouvrir cette interview : " + (e.message || e));
+    openHistory();
+  }
+}
+
+if (els.historyBtn) els.historyBtn.addEventListener("click", openHistory);
+if (els.historyBtn2) els.historyBtn2.addEventListener("click", openHistory);
+if (els.historyBackBtn) els.historyBackBtn.addEventListener("click", () => showScreen("setup"));
+
+/* ---------------- Configuration cle API (mode Electron) ---------------- */
+const isElectron = Boolean(window.api && window.api.isElectron);
+
+async function saveApiKey() {
+  els.configError.hidden = true;
+  const key = els.apiKeyInput.value.trim();
+  if (!key || !key.startsWith("sk-")) {
+    els.configError.textContent = "Cle invalide : elle doit commencer par \"sk-\".";
+    els.configError.hidden = false;
+    return;
+  }
+  els.saveKeyBtn.disabled = true;
+  els.saveKeyBtn.textContent = "Enregistrement…";
+  try {
+    await window.api.setApiKey(key);
+    els.apiKeyInput.value = "";
+    // Verifie que la cle est bien lisible par le serveur avant de continuer,
+    // puis recharge : l'amorcage detectera hasKey=true et affichera l'accueil.
+    let hasKey = false;
+    try {
+      const cfg = await (await fetch("/api/config")).json();
+      hasKey = Boolean(cfg.hasKey);
+    } catch {}
+    if (hasKey) {
+      location.reload();
+      return;
+    }
+    // La cle a ete ecrite mais le serveur ne la voit pas (cas rare : coffre OS
+    // indisponible). On bascule quand meme vers l'accueil.
+    showScreen("setup");
+  } catch (e) {
+    els.configError.textContent = "Echec de l'enregistrement : " + (e.message || e);
+    els.configError.hidden = false;
+  } finally {
+    els.saveKeyBtn.disabled = false;
+    els.saveKeyBtn.textContent = "Enregistrer";
+  }
+}
+
+if (els.saveKeyBtn) els.saveKeyBtn.addEventListener("click", saveApiKey);
+if (els.apiKeyInput) {
+  els.apiKeyInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveApiKey();
+  });
+}
+if (els.changeKeyLink) {
+  els.changeKeyLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    showScreen("config");
+  });
+}
+
+/* ---------------- Amorcage ---------------- */
+async function init() {
+  loadGuides();
+  loadBaseOptions();
+
+  if (isElectron) {
+    // En Electron : le lien "Changer la cle" est disponible, et on affiche
+    // l'ecran de config tant qu'aucune cle n'est enregistree.
+    if (els.settingsLink) els.settingsLink.hidden = false;
+    try {
+      const secure = await window.api.isSecureStorage();
+      if (!secure && els.configHint) {
+        els.configHint.textContent =
+          "⚠️ Stockage securise OS indisponible : la cle sera conservee en clair sur ce poste.";
+      }
+    } catch {}
+
+    let hasKey = false;
+    try {
+      const cfg = await (await fetch("/api/config")).json();
+      hasKey = Boolean(cfg.hasKey);
+    } catch {}
+    showScreen(hasKey ? "setup" : "config");
+  } else {
+    // Mode web : la cle vient du serveur (.env), pas d'ecran de config.
+    showScreen("setup");
+  }
+}
+
+init();
